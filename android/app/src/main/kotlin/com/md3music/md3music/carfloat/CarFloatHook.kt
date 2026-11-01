@@ -189,14 +189,14 @@ object CarFloatHook {
             // 1) 内容从原父容器摘出
             parent.removeView(c)
             originalParent = parent
-            // 原窗口空壳退场：摘走内容后 decor 只剩 NormalTheme 黑背景（用户视角=全屏黑）。
-            // 把原窗口调成透明+不出现在键层，透出海鸥桌面——视觉上只剩悬浮窗。
+            // payload 权威收尾（之前漏抄——这是"全屏黑壳"的正解）：宿主 Activity
+            // moveTaskToBack 退后台，桌面上只剩海鸥+悬浮窗，黑壳根本不出现。
+            // 注意 payload 里 pushHostBack 有个反逻辑写法（if hostActivity != null 才退），
+            // 这里按语义正确实现：悬浮成功后宿主必须退场。
             try {
-                act.window.setBackgroundDrawableResource(android.R.color.transparent)
-                act.window.setDimAmount(0f)
+                act.moveTaskToBack(true)
+                Log.i(TAG, "宿主已退后台（pushHostBack）")
             } catch (_: Throwable) {}
-            // decor 空壳保留（引擎/JNI 链不破坏），但让它整窗让位
-            try { act.window.decorView.visibility = android.view.View.INVISIBLE } catch (_: Throwable) {}
             // 2) 自建深色容器（QQ 车机风格底色），内容【全幅】跟随画框（payload 同款
             //    MATCH_PARENT）—— 画框多大界面多大；窗口横 = Compose 自动双栏横版
             val box = FrameLayout(act)
