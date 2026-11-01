@@ -32,7 +32,8 @@
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="landscape"
-            tools:node="merge">
+            tools:node="merge"
+            tools:replace="android:screenOrientation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
