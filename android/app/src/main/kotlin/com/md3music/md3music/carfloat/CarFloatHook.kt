@@ -198,6 +198,28 @@ object CarFloatHook {
             // payload 收尾：去掉系统栏 inset 残留（悬浮矩形里内容要满幅）
             c.fitsSystemWindows = false
             c.setPadding(0, 0, 0, 0)
+            // Flutter 黑屏对抗（MD3 实测：摘窗后悬浮窗黑）——三层：
+            //  a. 官方 API 重挂引擎：FlutterView detach 时引擎停渲染（原 Surface 随原窗口销毁），
+            //     跨窗口 attach 不自动重启渲染（尤其 MD3 的引擎复用路径 attachToEngine 不重跑）。
+            //     detach + attach 强制 FlutterRenderer 拿新窗口的新 Surface。
+            //  b. 钉回不透明背景（应用为缩小动画设过 TRANSPARENT，表面没画出来时整片黑）。
+            //  c. post 延迟强制重绘兜底。
+            if (c is io.flutter.embedding.android.FlutterView) {
+                try {
+                    val eng = c.attachedFlutterEngine
+                    if (eng != null) {
+                        c.detachFromFlutterEngine()
+                        c.attachToFlutterEngine(eng)
+                        Log.i(TAG, "FlutterView 引擎已重挂（跨窗口 Surface 重建）")
+                    }
+                } catch (t: Throwable) { Log.w(TAG, "引擎重挂失败: ${t.message}") }
+                try { c.setBackgroundColor(Color.parseColor("#0E1114")) } catch (_: Throwable) {}
+            }
+            c.post {
+                c.invalidate()
+                c.requestLayout()
+                c.postDelayed({ c.invalidate() }, 120)
+            }
             // 3) 容器挂系统悬浮窗（payload 同款参数：可聚焦，输入法可用）
             appWindowManager().addView(box, buildParams(x, y, w, h))
             container = box
@@ -250,6 +272,15 @@ object CarFloatHook {
             try {
                 parent.addView(c, ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                if (c is io.flutter.embedding.android.FlutterView) {
+                    try {
+                        val eng = c.attachedFlutterEngine
+                        if (eng != null) {
+                            c.detachFromFlutterEngine()
+                            c.attachToFlutterEngine(eng)
+                        }
+                    } catch (_: Throwable) {}
+                }
                 Log.i(TAG, "内容已还原回 Activity 窗口")
             } catch (t: Throwable) {
                 Log.w(TAG, "还原失败（重建兜底）: ${t.message}")
