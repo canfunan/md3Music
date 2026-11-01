@@ -649,6 +649,7 @@ jobs:
   # ============================================================
   build-windows:
     name: Build Windows portable
+    if: false   # 只要安卓版：Windows 打包按需再开（改回 true）
     runs-on: windows-latest
     needs: build-android
     timeout-minutes: 60
