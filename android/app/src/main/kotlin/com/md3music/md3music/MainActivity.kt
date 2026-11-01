@@ -268,6 +268,8 @@ class MainActivity : FlutterActivity() {
             "StartupTiming",
             "phase=activity_on_create_super_complete elapsed_ms=${SystemClock.elapsedRealtime() - createStartedAt}",
         )
+        // 海鸥桌面车机悬浮协议（技能 float-inject-adaptation）：showmap 直投/广播 + FGS 保活
+        com.md3music.md3music.carfloat.CarFloatHook.install(application)
         // 本次启动被看门狗判定自动回退（resolveUseImpeller 已在 super.onCreate 中结算）：
         // UI 尚未就绪，直接弹系统 Toast（不依赖 Flutter 渲染）。
         if (RenderEngineManager.fellBackToSkiaThisLaunch) {

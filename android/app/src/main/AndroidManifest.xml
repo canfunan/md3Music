@@ -48,6 +48,7 @@
         <meta-data android:name="support_vivo_musicwidgetmix_logo_color" android:value="\#00FFFF\#FFFFFF" />
         <activity
             android:name=".MainActivity"
+            android:screenOrientation="sensorLandscape"
             android:exported="true"
             android:launchMode="singleTask"
             android:theme="@style/LaunchTheme"
@@ -250,6 +251,17 @@
         <meta-data
             android:name="io.flutter.embedding.android.EnableImpeller"
             android:value="${enableImpeller}" />
+        <!-- 车机悬浮保活 + 海鸥直投通道（技能 float-inject-adaptation）：
+             exported 服务 = 海鸥 startService 直投（binder 穿透 greezer 冻结）；
+             mediaPlayback FGS 载体续命 -->
+        <service
+            android:name=".carfloat.CarFloatKeepService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="com.md3.carfloat.FLOAT" />
+            </intent-filter>
+        </service>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
