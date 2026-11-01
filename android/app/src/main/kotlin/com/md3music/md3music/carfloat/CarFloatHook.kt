@@ -189,6 +189,14 @@ object CarFloatHook {
             // 1) 内容从原父容器摘出
             parent.removeView(c)
             originalParent = parent
+            // 原窗口空壳退场：摘走内容后 decor 只剩 NormalTheme 黑背景（用户视角=全屏黑）。
+            // 把原窗口调成透明+不出现在键层，透出海鸥桌面——视觉上只剩悬浮窗。
+            try {
+                act.window.setBackgroundDrawableResource(android.R.color.transparent)
+                act.window.setDimAmount(0f)
+            } catch (_: Throwable) {}
+            // decor 空壳保留（引擎/JNI 链不破坏），但让它整窗让位
+            try { act.window.decorView.visibility = android.view.View.INVISIBLE } catch (_: Throwable) {}
             // 2) 自建深色容器（QQ 车机风格底色），内容【全幅】跟随画框（payload 同款
             //    MATCH_PARENT）—— 画框多大界面多大；窗口横 = Compose 自动双栏横版
             val box = FrameLayout(act)
@@ -269,6 +277,11 @@ object CarFloatHook {
             try { box.removeAllViews() } catch (_: Throwable) {}
         }
         if (c != null && parent != null) {
+            // 原窗口回归：恢复可见+原背景（launch_background 由主题自己管）
+            val actNow = topActivity
+            if (actNow != null) {
+                try { actNow.window.decorView.visibility = android.view.View.VISIBLE } catch (_: Throwable) {}
+            }
             try {
                 parent.addView(c, ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
