@@ -10,6 +10,8 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -18,20 +20,29 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 
 /**
- * 车机悬浮协议（逐字对齐星环注入器 payload 的 FloatWindow 权威实现，
- * 反编译 assets/payload.dex → cn.kuwo.kwmusiccar.FloatWindow 逐条比对）：
+ * 车机悬浮协议（2026-11-02 全面对齐星环注入器 payload 权威实现：
+ * 反编译 assets/payload.dex → cn.kuwo.kwmusiccar.FloatWindow 逐条比对重排）：
  *
- *  · 摘【decor.getChildAt(0)】内容根 View —— decor 留在 Activity 窗口当空壳，
- *    不破坏 Activity 的窗口关系链（直接搬 decor = "already been added" 实锤炸点）
- *  · 自建 FrameLayout 容器挂 WindowManager（深色底），内容 remove 后塞进容器
- *  · flags = 0x120（LAYOUT_IN_SCREEN | NOT_TOUCH_MODAL，**可聚焦** —— 输入法可用，
- *    QQ/网易云注入版同款）；type = 2038（≥O）/ 2002；format = TRANSLUCENT
- *  · 内容 setFitsSystemWindows(false) + 零 padding（去掉系统栏 inset 残留）
- *  · closemap：内容 remove → 塞回【原父容器】（挂浮时记录的原 parent）
- *  · resize：容器 updateViewLayout，内容 MATCH_PARENT 跟随（Compose 自动重排，
- *    天然解决「拉伸掉挂」）
- *  · 应用回前台（resume）→ 自动还原内容到窗口（用户全屏打开应用时的自然行为）
- *  · 宿主销毁 → 容器摘除 + 全引用重置
+ *  · 摘【decor.getChildAt(0)】内容根 View —— decor 留在 Activity 窗口当空壳
+ *  · ★顺序对齐 payload（黑屏根因修复）：摘 → 塞容器 → **先挂悬浮窗** → fits/padding
+ *    → FlutterView detach+attach（此时 View 已 attach to window，Surface 才建得出来）
+ *    → 引擎 lifecycle 强制 resumed（宿主退场后 delegate 会发 paused 停渲染管线，
+ *      必须补发回来）→ post 重绘 → **最后 moveTaskToBack**（payload pushHostBack
+ *      同款时机）→ ACK。旧版在挂窗前退场 = 引擎 paused + 无 Surface = 永久黑屏。
+ *  · closemap 延迟 700ms + showSeq 防竞态（payload Receiver$1 同款）：700ms 内来了
+ *    新 showmap 则丢弃这条 close —— 海鸥 resize 走 close→show，立即 close 会把
+ *    刚挂的新窗拆掉（拉伸掉挂根因之一）
+ *  · 「用户在前台门」（payload doShow 同款）：resumed 的 MainActivity 收到 showmap
+ *    → 不摘屏，记 pendingRect 等退出后 catchup 自动挂（用户正用时绝不抢屏）
+ *  · pendingShow + catchup 追赶（payload scheduleCatchup 同款）：应用首帧未就绪/
+ *    无前台 Activity 时记 pendingRect，倍增间隔重试（1.2s 起，5 次封顶），
+ *    onActivityPaused 时立即补试 —— 绑定后不用手动再触发
+ *  · 权限双查（payload canOverlay 同款）：Settings.canDrawOverlays + appops
+ *    checkOp(24)；无权限跳授权页后 permPoll 每秒轮询，授权回来自动补挂
+ *  · 悬浮期间 MainActivity resume → moveTaskToBack 压回保槽位（payload LifecycleBridge
+ *    同款，还原风暴的正解是「压回」不是「不还原」）+ 引擎 lifecycle 补发
+ *  · flags = 0x120（LAYOUT_IN_SCREEN | NOT_TOUCH_MODAL，可聚焦）；type = 2038/2002
+ *  · 还原：内容塞回原父容器 + 引擎 detach+attach；宿主销毁 → 容器摘除 + 全引用重置
  */
 object CarFloatHook {
 
@@ -45,6 +56,8 @@ object CarFloatHook {
     private const val FLAG_FLOAT = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL   // 0x120，payload 同款
 
+    private val UI = Handler(Looper.getMainLooper())
+
     /** 服务直投入口（CarFloatKeepService onStartCommand 调）：binder 解冻 + 主线程挂窗。 */
     fun show(x: Int, y: Int, right: Int, bottom: Int) {
         onShowMap(x, y, right, bottom)
@@ -55,24 +68,46 @@ object CarFloatHook {
         closeFloat()
     }
 
-
     @Volatile private var app: Application? = null
-    @Volatile private var topActivity: Activity? = null
+    @Volatile private var resumedActivity: Activity? = null   // resume 记 / pause 清（payload 同款）
+    @Volatile private var topActivity: Activity? = null       // 最后存活的 Activity（findContent 用）
     @Volatile private var container: FrameLayout? = null
     @Volatile private var content: View? = null
     @Volatile private var originalParent: ViewGroup? = null
     @Volatile private var floatingRect: IntArray? = null
+    /** pendingShow + catchup：摘不到/前台占用时记矩形，倍增间隔重试（payload 同款）。 */
+    @Volatile private var pendingRect: IntArray? = null
+    private var catchupTries = 0
+    private var catchupRunnable: Runnable? = null
+    /** show 计数：close 延迟窗口内来了新 show 则丢弃 close（payload showSeq 同款）。 */
+    @Volatile private var showSeq = 0
+    private var permPoll: Runnable? = null
 
     @JvmStatic
     fun install(application: Application) {
         app = application
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
+                resumedActivity = activity
                 topActivity = activity
-                // 注意：resume 不还原。MD3 的桌面图标 alias / 悬浮歌词入口会在悬浮期间
-                // 短暂 resume（不进前台）→ 一还原悬浮窗就没了（实测还原风暴）。
-                // 还原只由 closemap 指挥（海鸥/用户显式关闭），对齐星环 payload 语义。
+                if (container != null && activity.window != null &&
+                        activity.javaClass.simpleName.endsWith("MainActivity")) {
+                    // 悬浮期间宿主又被拉到前台 → 压回保槽位（payload 同款），
+                    // 引擎 lifecycle 随 onStop 变 paused，稍后强制补发 resumed
+                    try {
+                        activity.moveTaskToBack(true)
+                        Log.i(TAG, "宿主悬浮期被拉前台 → 压回保槽位")
+                    } catch (_: Throwable) {}
+                    forceEngineResumed()
+                }
             }
+
+            override fun onActivityPaused(activity: Activity) {
+                if (resumedActivity === activity) resumedActivity = null
+                // 宿主刚退到后台：pendingRect 在手就立刻补试（全自动挂载的衔接点）
+                if (pendingRect != null && container == null) scheduleCatchup(0)
+            }
+
             override fun onActivityDestroyed(activity: Activity) {
                 if (topActivity === activity) topActivity = null
                 // 宿主销毁：内容随 Activity 死亡，容器必须摘除 + 全引用重置（payload 同款）
@@ -82,7 +117,6 @@ object CarFloatHook {
             }
             override fun onActivityCreated(a: Activity, s: android.os.Bundle?) = Unit
             override fun onActivityStarted(a: Activity) = Unit
-            override fun onActivityPaused(a: Activity) = Unit
             override fun onActivityStopped(a: Activity) = Unit
             override fun onActivitySaveInstanceState(a: Activity, o: android.os.Bundle) = Unit
         })
@@ -94,7 +128,7 @@ object CarFloatHook {
                         ACTION_SHOW -> onShowMap(
                             intent.getIntExtra("x", 0), intent.getIntExtra("y", 0),
                             intent.getIntExtra("w", 0), intent.getIntExtra("h", 0))
-                        ACTION_CLOSE -> closeFloat()
+                        ACTION_CLOSE -> onCloseMap()
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "onReceive: ${t.message}")
@@ -124,32 +158,30 @@ object CarFloatHook {
         }
     }
 
+    /* ==================== showmap 主链（payload doShow/showFloat 对齐版） ==================== */
+
     /** showmap。w/h = 右下角坐标语义（海鸥按猴哥协议发），先转宽高。 */
     private fun onShowMap(x: Int, y: Int, right: Int, bottom: Int) {
         val a = app ?: return reply(ACTION_NOVIEW)
-
-        // 无悬浮权限（普通用户首次）：跳系统授权页点一次「允许」，之后全自动
-        if (!canDrawOverlays(a)) {
-            Log.i(TAG, "showmap：无悬浮权限，跳授权页")
-            reply(ACTION_NOVIEW)
-            try {
-                a.startActivity(Intent(
-                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    android.net.Uri.parse("package:${a.packageName}")
-                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            } catch (t: Throwable) {
-                Log.w(TAG, "跳授权页失败: ${t.message}")
-            }
-            return
-        }
-
         val w = right - x
         val h = bottom - y
         if (w <= 0 || h <= 0) return reply(ACTION_NOVIEW)
+        showSeq++
+        pendingRect = intArrayOf(x, y, w, h)
+        catchupTries = 0
+        cancelCatchup()
 
-        val act = topActivity
+        // 权限双查（payload canOverlay：canDrawOverlays + appops checkOp 24）
+        if (!canOverlay(a)) {
+            Log.i(TAG, "showmap：无悬浮权限，跳授权页 + 轮询补挂")
+            reply(ACTION_NOVIEW)
+            requestOverlayPermission(a)
+            startPermPoll(a)
+            return
+        }
+
+        // 已浮着：同矩形幂等（海鸥重挂会重发）；矩形变化 → 容器 updateViewLayout
         val cur = content
-        // 已浮着：同矩形幂等（海鸥重挂会重发），矩形变化 → 容器直接 updateViewLayout
         if (container != null && cur != null) {
             val r = floatingRect
             if (r != null && r[0] == x && r[1] == y && r[2] == w && r[3] == h) {
@@ -158,10 +190,9 @@ object CarFloatHook {
             }
             try {
                 appWindowManager().updateViewLayout(container, buildParams(x, y, w, h))
-                // 内容全幅跟随画框：requestLayout 让 Compose 按新尺寸重组
-                //（width>height 时走双栏横版，MeloX 页面自身响应窗口尺寸）
-                cur.requestLayout()
+                cur.requestLayout()   // Compose/Flutter 按新尺寸重组
                 floatingRect = intArrayOf(x, y, w, h)
+                pendingRect = null
                 reply(ACTION_FLOATED)
                 Log.i(TAG, "悬浮窗重定位 rect($x,$y,$w,$h)")
             } catch (t: Throwable) {
@@ -170,49 +201,59 @@ object CarFloatHook {
             }
             return
         }
-        if (act == null || act.window == null) {
-            Log.i(TAG, "showmap：无前台 Activity，回 noview")
-            reply(ACTION_NOVIEW)
+
+        // ★用户在前台门（payload doShow 同款）：用户正在应用里 → 不摘屏，
+        // 记 pendingRect 等他退出，onActivityPaused 时 catchup 自动挂
+        val act = resumedActivity ?: topActivity
+        if (act != null && act === resumedActivity && !act.isFinishing) {
+            Log.i(TAG, "showmap：用户在应用内，保持全屏（等退出后自动挂）")
+            scheduleCatchup(1200)
             return
         }
 
+        showFloat(x, y, w, h)
+    }
+
+    private fun showFloat(x: Int, y: Int, w: Int, h: Int) {
+        val a = app ?: return
+        val act = topActivity
+        if (act == null || act.window == null) {
+            Log.i(TAG, "showmap：无前台 Activity，pending 等就绪")
+            scheduleCatchup(1200)
+            return
+        }
         try {
             val c = findContent(act) ?: run {
-                Log.i(TAG, "showFloat: content not ready")
-                reply(ACTION_NOVIEW)
+                Log.i(TAG, "showFloat: content not ready（首帧未就绪）")
+                scheduleCatchup(1200)
                 return
             }
             val parent = c.parent as? ViewGroup
             if (parent == null) {
-                reply(ACTION_NOVIEW)
+                scheduleCatchup(1200)
                 return
             }
             // 1) 内容从原父容器摘出
             parent.removeView(c)
             originalParent = parent
-            // payload 权威收尾（之前漏抄——这是"全屏黑壳"的正解）：宿主 Activity
-            // moveTaskToBack 退后台，桌面上只剩海鸥+悬浮窗，黑壳根本不出现。
-            // 注意 payload 里 pushHostBack 有个反逻辑写法（if hostActivity != null 才退），
-            // 这里按语义正确实现：悬浮成功后宿主必须退场。
-            try {
-                act.moveTaskToBack(true)
-                Log.i(TAG, "宿主已退后台（pushHostBack）")
-            } catch (_: Throwable) {}
-            // 2) 自建深色容器（QQ 车机风格底色），内容【全幅】跟随画框（payload 同款
-            //    MATCH_PARENT）—— 画框多大界面多大；窗口横 = Compose 自动双栏横版
+            // 2) 自建深色容器（QQ 车机风格底色），内容【全幅】跟随画框
             val box = FrameLayout(act)
             box.background = ColorDrawable(Color.parseColor("#0E1114"))
             box.addView(c, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            // payload 收尾：去掉系统栏 inset 残留（悬浮矩形里内容要满幅）
+            // 3) ★先挂系统悬浮窗（payload 顺序：addView 成功后才做收尾与退场）
+            appWindowManager().addView(box, buildParams(x, y, w, h))
+            container = box
+            content = c
+            floatingRect = intArrayOf(x, y, w, h)
+            pendingRect = null
+            // 4) 挂窗成功后的收尾（payload 同款时机）：去 inset 残留，内容满幅
             c.fitsSystemWindows = false
             c.setPadding(0, 0, 0, 0)
-            // Flutter 黑屏对抗（MD3 实测：摘窗后悬浮窗黑）——三层：
-            //  a. 官方 API 重挂引擎：FlutterView detach 时引擎停渲染（原 Surface 随原窗口销毁），
-            //     跨窗口 attach 不自动重启渲染（尤其 MD3 的引擎复用路径 attachToEngine 不重跑）。
-            //     detach + attach 强制 FlutterRenderer 拿新窗口的新 Surface。
-            //  b. 钉回不透明背景（应用为缩小动画设过 TRANSPARENT，表面没画出来时整片黑）。
-            //  c. post 延迟强制重绘兜底。
+            // 5) ★Flutter 黑屏对抗（View 已 attach to window，Surface 才建得出来）：
+            //    a. 官方 API 重挂引擎：detach + attach 强制 FlutterRenderer 拿新窗口的新 Surface
+            //    b. 钉回不透明背景（launch 动画设过 TRANSPARENT，表面没画出来时整片黑）
+            //    c. 引擎 lifecycle 强制 resumed（宿主退场后 delegate 发 paused 停渲染管线）
             if (c is io.flutter.embedding.android.FlutterView) {
                 try {
                     val eng = c.attachedFlutterEngine
@@ -229,11 +270,14 @@ object CarFloatHook {
                 c.requestLayout()
                 c.postDelayed({ c.invalidate() }, 120)
             }
-            // 3) 容器挂系统悬浮窗（payload 同款参数：可聚焦，输入法可用）
-            appWindowManager().addView(box, buildParams(x, y, w, h))
-            container = box
-            content = c
-            floatingRect = intArrayOf(x, y, w, h)
+            forceEngineResumed()
+            // 6) ★最后宿主退场（payload pushHostBack 同款时机）：桌面上只剩
+            //    海鸥 + 悬浮窗，decor 空壳黑屏不出现
+            try {
+                act.moveTaskToBack(true)
+                Log.i(TAG, "宿主已退后台（pushHostBack）")
+            } catch (_: Throwable) {}
+            forceEngineResumed()   // moveTaskToBack 的 onStop 会再发 paused，压回去
             reply(ACTION_FLOATED)
             Log.i(TAG, "悬浮成功 rect($x,$y,$w,$h)，已回 ACK")
         } catch (t: Throwable) {
@@ -243,6 +287,123 @@ object CarFloatHook {
             reply(ACTION_NOVIEW)
         }
     }
+
+    /** 引擎 lifecycle 强制 resumed + focused（宿主退场后停渲染管线的唯一解药）。 */
+    private fun forceEngineResumed() {
+        UI.postDelayed({
+            try {
+                val c = content ?: return@postDelayed
+                if (c !is io.flutter.embedding.android.FlutterView) return@postDelayed
+                val eng = c.attachedFlutterEngine ?: return@postDelayed
+                val ch = eng.lifecycleChannel
+                ch.appIsResumed()
+                ch.aWindowIsFocused()
+                Log.i(TAG, "引擎 lifecycle 强制 resumed（保悬浮渲染）")
+            } catch (t: Throwable) {
+                Log.w(TAG, "引擎 lifecycle 补发失败: ${t.message}")
+            }
+        }, 600)
+    }
+
+    /* ==================== pending + catchup（payload scheduleCatchup 同款） ==================== */
+
+    private fun scheduleCatchup(delayMs: Long) {
+        if (pendingRect == null) return
+        if (catchupTries >= 5) {
+            Log.i(TAG, "catchup 放弃（5 次）")
+            return
+        }
+        cancelCatchup()
+        val r = Runnable {
+            catchupRunnable = null
+            val rect = pendingRect ?: return@Runnable
+            if (container != null) return@Runnable
+            // 用户还在应用里 → 继续等（onActivityPaused 会补试）
+            if (resumedActivity != null) return@Runnable
+            catchupTries++
+            Log.i(TAG, "catchup #$catchupTries rect(${rect[0]},${rect[1]},${rect[2]},${rect[3]})")
+            onShowMap(rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
+        }
+        catchupRunnable = r
+        UI.postDelayed(r, delayMs)
+    }
+
+    private fun cancelCatchup() {
+        catchupRunnable?.let { UI.removeCallbacks(it) }
+        catchupRunnable = null
+    }
+
+    /* ==================== closemap（payload 700ms defer + showSeq 防竞态） ==================== */
+
+    private fun onCloseMap() {
+        if (container == null) {
+            Log.i(TAG, "closemap: not floating")
+            return
+        }
+        val seqAtClose = showSeq
+        Log.i(TAG, "closemap -> defer 700ms (seq=$seqAtClose)")
+        UI.postDelayed({
+            if (showSeq != seqAtClose) {
+                Log.i(TAG, "closemap dropped：延迟期内来了新 showmap（resize 防竞态）")
+                return@postDelayed
+            }
+            closeFloat()
+        }, 700)
+    }
+
+    /* ==================== 权限（payload canOverlay/checkOp + permPoll 同款） ==================== */
+
+    private fun canOverlay(ctx: Context): Boolean {
+        if (!try { android.provider.Settings.canDrawOverlays(ctx) } catch (_: Throwable) { false }) {
+            return false
+        }
+        // appops 双查：个别 ROM canDrawOverlays=true 但 appops 拒绝 → addView 直接炸
+        // OP_SYSTEM_ALERT_WINDOW(int) 是 @hide，用公开字符串 OPSTR（API 29+）
+        if (Build.VERSION.SDK_INT < 29) return true   // 老系统 canDrawOverlays 即权威
+        return try {
+            val am = ctx.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+            val mode = am.checkOpNoThrow(
+                android.app.AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+                android.os.Process.myUid(), ctx.packageName)
+            mode == android.app.AppOpsManager.MODE_ALLOWED ||
+                    mode == android.app.AppOpsManager.MODE_DEFAULT
+        } catch (_: Throwable) { true }
+    }
+
+    private fun requestOverlayPermission(ctx: Context) {
+        try {
+            ctx.startActivity(Intent(
+                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${ctx.packageName}")
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (t: Throwable) {
+            Log.w(TAG, "跳授权页失败: ${t.message}")
+        }
+    }
+
+    /** 授权页轮询：授权回来自动补挂 pendingRect（payload schedulePermPoll 同款）。 */
+    private fun startPermPoll(ctx: Context) {
+        permPoll?.let { UI.removeCallbacks(it) }
+        var tries = 0
+        val r = object : Runnable {
+            override fun run() {
+                val rect = pendingRect
+                if (rect == null || container != null) { permPoll = null; return }
+                if (tries++ > 30) { permPoll = null; return }   // 30 秒封顶
+                if (canOverlay(ctx)) {
+                    Log.i(TAG, "悬浮权限已授予，自动补挂")
+                    permPoll = null
+                    onShowMap(rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
+                    return
+                }
+                UI.postDelayed(this, 1000)
+            }
+        }
+        permPoll = r
+        UI.postDelayed(r, 1500)
+    }
+
+    /* ==================== 还原 ==================== */
 
     /** 内容根 = decor.getChildAt(0)（payload findContent 同款；decor 留守不搬）。 */
     private fun findContent(act: Activity): View? {
@@ -336,9 +497,6 @@ object CarFloatHook {
         val a = app!!
         return a.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     }
-
-    private fun canDrawOverlays(ctx: Context): Boolean =
-        try { android.provider.Settings.canDrawOverlays(ctx) } catch (_: Throwable) { false }
 
     private fun reply(action: String) {
         try {
