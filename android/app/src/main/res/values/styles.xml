@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Theme applied to the Android Window while the process is starting when the OS's Dark Mode setting is off -->
     <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <!-- Show a splash screen on the activity. Automatically removed when
@@ -21,7 +21,7 @@
         <!-- 刘海/挖孔屏：内容延伸到短边（与锁屏歌词主题同款），播放页横屏时
              安全区由 Dart 侧对称补偿，主题层不再让系统开黑边。该属性 API 28+
              才生效，低版本自动忽略，minSdk 之下无运行时风险。 -->
-        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="o_mr1">shortEdges</item>
     </style>
 
     <!-- 锁屏歌词主题：暗色全屏无标题栏，不透明遮住锁屏时钟，作为纯展示层 -->
@@ -31,6 +31,6 @@
         <!-- 锁屏层改为可触控（卡片按钮 + 上滑/双击解锁），窗口保持不透明以遮住系统锁屏时钟 -->
         <item name="android:windowIsTranslucent">false</item>
         <!-- 刘海屏：内容延伸到短边，避免上下留黑边导致歌词/卡片被裁 -->
-        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="o_mr1">shortEdges</item>
     </style>
 </resources>
