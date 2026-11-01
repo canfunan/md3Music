@@ -69,8 +69,9 @@ object CarFloatHook {
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 topActivity = activity
-                // 应用回前台 → 内容还原回窗口（全屏使用）；海鸥随后重发 showmap 再浮
-                if (container != null) restoreContentToWindow()
+                // 注意：resume 不还原。MD3 的桌面图标 alias / 悬浮歌词入口会在悬浮期间
+                // 短暂 resume（不进前台）→ 一还原悬浮窗就没了（实测还原风暴）。
+                // 还原只由 closemap 指挥（海鸥/用户显式关闭），对齐星环 payload 语义。
             }
             override fun onActivityDestroyed(activity: Activity) {
                 if (topActivity === activity) topActivity = null
