@@ -83,6 +83,29 @@ object CarFloatHook {
     @Volatile private var showSeq = 0
     private var permPoll: Runnable? = null
 
+    /* ==================== 黑匣子（payload logWriter 同款）：文件日志供真机定位 ==================== */
+
+    private var logWriter: java.io.FileWriter? = null
+    private val logLock = Any()
+
+    private fun log(msg: String) {
+        Log.i(TAG, msg)
+        try {
+            val a = app ?: return
+            synchronized(logLock) {
+                if (logWriter == null) {
+                    val f = java.io.File(a.getExternalFilesDir(null), "md3float.log")
+                    if (f.exists() && f.length() > 256 * 1024) f.delete()   // 单文件封顶，满了重开
+                    logWriter = java.io.FileWriter(f, true)
+                }
+                logWriter!!.append(java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()))
+                    .append(' ').append(msg).append('\n').flush()
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun logW(msg: String) { log("W $msg") }
+
     @JvmStatic
     fun install(application: Application) {
         app = application
@@ -96,7 +119,7 @@ object CarFloatHook {
                     // 引擎 lifecycle 随 onStop 变 paused，稍后强制补发 resumed
                     try {
                         activity.moveTaskToBack(true)
-                        Log.i(TAG, "宿主悬浮期被拉前台 → 压回保槽位")
+                        log("宿主悬浮期被拉前台 → 压回保槽位")
                     } catch (_: Throwable) {}
                     forceEngineResumed()
                 }
@@ -131,7 +154,7 @@ object CarFloatHook {
                         ACTION_CLOSE -> onCloseMap()
                     }
                 } catch (t: Throwable) {
-                    Log.w(TAG, "onReceive: ${t.message}")
+                    logW("onReceive: ${t.message}")
                     reply(ACTION_NOVIEW)
                 }
             }
@@ -146,15 +169,15 @@ object CarFloatHook {
             } else {
                 application.registerReceiver(rx, filter)
             }
-            Log.i(TAG, "车机悬浮协议已挂（showmap/floated）")
+            log("车机悬浮协议已挂（showmap/floated）")
         } catch (t: Throwable) {
-            Log.w(TAG, "协议注册失败: ${t.message}")
+            logW("协议注册失败: ${t.message}")
         }
         // 无 root 保活：FGS 载体进程冻结引擎不碰（greezer 对裸进程秒冻 = showmap 被 SKIPPED）
         try {
             CarFloatKeepService.ensure(application)
         } catch (t: Throwable) {
-            Log.w(TAG, "保活服务拉起失败: ${t.message}")
+            logW("保活服务拉起失败: ${t.message}")
         }
     }
 
@@ -165,6 +188,7 @@ object CarFloatHook {
         val a = app ?: return reply(ACTION_NOVIEW)
         val w = right - x
         val h = bottom - y
+        log("showmap 收到 right($x,$y,$right,$bottom) -> size($w,$h)")
         if (w <= 0 || h <= 0) return reply(ACTION_NOVIEW)
         showSeq++
         pendingRect = intArrayOf(x, y, w, h)
@@ -173,7 +197,7 @@ object CarFloatHook {
 
         // 权限双查（payload canOverlay：canDrawOverlays + appops checkOp 24）
         if (!canOverlay(a)) {
-            Log.i(TAG, "showmap：无悬浮权限，跳授权页 + 轮询补挂")
+            log("showmap：无悬浮权限，跳授权页 + 轮询补挂")
             reply(ACTION_NOVIEW)
             requestOverlayPermission(a)
             startPermPoll(a)
@@ -194,9 +218,9 @@ object CarFloatHook {
                 floatingRect = intArrayOf(x, y, w, h)
                 pendingRect = null
                 reply(ACTION_FLOATED)
-                Log.i(TAG, "悬浮窗重定位 rect($x,$y,$w,$h)")
+                log("悬浮窗重定位 rect($x,$y,$w,$h)")
             } catch (t: Throwable) {
-                Log.w(TAG, "重定位失败: ${t.message}")
+                logW("重定位失败: ${t.message}")
                 reply(ACTION_NOVIEW)
             }
             return
@@ -206,7 +230,7 @@ object CarFloatHook {
         // 记 pendingRect 等他退出，onActivityPaused 时 catchup 自动挂
         val act = resumedActivity ?: topActivity
         if (act != null && act === resumedActivity && !act.isFinishing) {
-            Log.i(TAG, "showmap：用户在应用内，保持全屏（等退出后自动挂）")
+            log("showmap：用户在应用内，保持全屏（等退出后自动挂）")
             scheduleCatchup(1200)
             return
         }
@@ -218,13 +242,13 @@ object CarFloatHook {
         val a = app ?: return
         val act = topActivity
         if (act == null || act.window == null) {
-            Log.i(TAG, "showmap：无前台 Activity，pending 等就绪")
+            log("showmap：无前台 Activity，pending 等就绪")
             scheduleCatchup(1200)
             return
         }
         try {
             val c = findContent(act) ?: run {
-                Log.i(TAG, "showFloat: content not ready（首帧未就绪）")
+                log("showFloat: content not ready（首帧未就绪）")
                 scheduleCatchup(1200)
                 return
             }
@@ -260,9 +284,9 @@ object CarFloatHook {
                     if (eng != null) {
                         c.detachFromFlutterEngine()
                         c.attachToFlutterEngine(eng)
-                        Log.i(TAG, "FlutterView 引擎已重挂（跨窗口 Surface 重建）")
+                        log("FlutterView 引擎已重挂（跨窗口 Surface 重建）")
                     }
-                } catch (t: Throwable) { Log.w(TAG, "引擎重挂失败: ${t.message}") }
+                } catch (t: Throwable) { logW("引擎重挂失败: ${t.message}") }
                 try { c.setBackgroundColor(Color.parseColor("#0E1114")) } catch (_: Throwable) {}
             }
             c.post {
@@ -275,13 +299,13 @@ object CarFloatHook {
             //    海鸥 + 悬浮窗，decor 空壳黑屏不出现
             try {
                 act.moveTaskToBack(true)
-                Log.i(TAG, "宿主已退后台（pushHostBack）")
+                log("宿主已退后台（pushHostBack）")
             } catch (_: Throwable) {}
             forceEngineResumed()   // moveTaskToBack 的 onStop 会再发 paused，压回去
             reply(ACTION_FLOATED)
-            Log.i(TAG, "悬浮成功 rect($x,$y,$w,$h)，已回 ACK")
+            log("悬浮成功 rect($x,$y,$w,$h)，已回 ACK")
         } catch (t: Throwable) {
-            Log.w(TAG, "悬浮失败: ${t.message}")
+            logW("悬浮失败: ${t.message}")
             // 失败把内容还回去，应用别黑掉
             restoreContentToWindow()
             reply(ACTION_NOVIEW)
@@ -298,9 +322,9 @@ object CarFloatHook {
                 val ch = eng.lifecycleChannel
                 ch.appIsResumed()
                 ch.aWindowIsFocused()
-                Log.i(TAG, "引擎 lifecycle 强制 resumed（保悬浮渲染）")
+                log("引擎 lifecycle 强制 resumed（保悬浮渲染）")
             } catch (t: Throwable) {
-                Log.w(TAG, "引擎 lifecycle 补发失败: ${t.message}")
+                logW("引擎 lifecycle 补发失败: ${t.message}")
             }
         }, 600)
     }
@@ -310,7 +334,7 @@ object CarFloatHook {
     private fun scheduleCatchup(delayMs: Long) {
         if (pendingRect == null) return
         if (catchupTries >= 5) {
-            Log.i(TAG, "catchup 放弃（5 次）")
+            log("catchup 放弃（5 次）")
             return
         }
         cancelCatchup()
@@ -321,7 +345,7 @@ object CarFloatHook {
             // 用户还在应用里 → 继续等（onActivityPaused 会补试）
             if (resumedActivity != null) return@Runnable
             catchupTries++
-            Log.i(TAG, "catchup #$catchupTries rect(${rect[0]},${rect[1]},${rect[2]},${rect[3]})")
+            log("catchup #$catchupTries rect(${rect[0]},${rect[1]},${rect[2]},${rect[3]})")
             onShowMap(rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
         }
         catchupRunnable = r
@@ -337,14 +361,14 @@ object CarFloatHook {
 
     private fun onCloseMap() {
         if (container == null) {
-            Log.i(TAG, "closemap: not floating")
+            log("closemap: not floating")
             return
         }
         val seqAtClose = showSeq
-        Log.i(TAG, "closemap -> defer 700ms (seq=$seqAtClose)")
+        log("closemap -> defer 700ms (seq=$seqAtClose)")
         UI.postDelayed({
             if (showSeq != seqAtClose) {
-                Log.i(TAG, "closemap dropped：延迟期内来了新 showmap（resize 防竞态）")
+                log("closemap dropped：延迟期内来了新 showmap（resize 防竞态）")
                 return@postDelayed
             }
             closeFloat()
@@ -377,7 +401,7 @@ object CarFloatHook {
                 android.net.Uri.parse("package:${ctx.packageName}")
             ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (t: Throwable) {
-            Log.w(TAG, "跳授权页失败: ${t.message}")
+            logW("跳授权页失败: ${t.message}")
         }
     }
 
@@ -391,7 +415,7 @@ object CarFloatHook {
                 if (rect == null || container != null) { permPoll = null; return }
                 if (tries++ > 30) { permPoll = null; return }   // 30 秒封顶
                 if (canOverlay(ctx)) {
-                    Log.i(TAG, "悬浮权限已授予，自动补挂")
+                    log("悬浮权限已授予，自动补挂")
                     permPoll = null
                     onShowMap(rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3])
                     return
@@ -412,14 +436,14 @@ object CarFloatHook {
             if (decor.childCount == 0) return null
             decor.getChildAt(0)
         } catch (t: Throwable) {
-            Log.w(TAG, "findContent: ${t.message}")
+            logW("findContent: ${t.message}")
             null
         }
     }
 
     private fun closeFloat() {
         if (container == null) {
-            Log.i(TAG, "closemap: not floating")
+            log("closemap: not floating")
             return
         }
         restoreContentToWindow()
@@ -456,9 +480,9 @@ object CarFloatHook {
                         }
                     } catch (_: Throwable) {}
                 }
-                Log.i(TAG, "内容已还原回 Activity 窗口")
+                log("内容已还原回 Activity 窗口")
             } catch (t: Throwable) {
-                Log.w(TAG, "还原失败（重建兜底）: ${t.message}")
+                logW("还原失败（重建兜底）: ${t.message}")
                 try { topActivity?.recreate() } catch (_: Throwable) {}
             }
         } else if (c != null) {
@@ -476,7 +500,7 @@ object CarFloatHook {
             try { appWindowManager().removeViewImmediate(box) } catch (_: Throwable) {}
             try { box.removeAllViews() } catch (_: Throwable) {}
         }
-        Log.i(TAG, "host destroyed, reset")
+        log("host destroyed, reset")
     }
 
     /** payload 同款：0x120 flags（可聚焦）、TRANSLUCENT、2038/2002、TOP|START。 */
