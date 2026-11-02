@@ -301,7 +301,6 @@ object CarFloatHook {
             // 全部手势区 → 海鸥左右滑翻页/长按把手全失效。屏蔽一切 fit + 短边刘海，矩形说了算。
             fitInsetsTypes = 0
             fitInsetsSides = 0
-            fitInsetsIgnoringVisibility = 0
             layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
