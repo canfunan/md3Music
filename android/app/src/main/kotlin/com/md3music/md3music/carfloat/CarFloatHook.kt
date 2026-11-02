@@ -295,6 +295,15 @@ object CarFloatHook {
             this.x = x
             this.y = y
             title = "Md3Float"
+            // 实测坑（HyperOS 竖屏 display + 横屏 app）：WM 默认 fitTypes=navigationBars|
+            // captionBar|systemOverlays 强制窗口适配系统栏并重布局 → mAttrs 的 x/y/w/h 被
+            // 忽略，窗口铺成「可用区全宽横条」（frame=[0,104][1080,938]），盖住桌面中段
+            // 全部手势区 → 海鸥左右滑翻页/长按把手全失效。屏蔽一切 fit + 短边刘海，矩形说了算。
+            fitInsetsTypes = 0
+            fitInsetsSides = 0
+            fitInsetsIgnoringVisibility = 0
+            layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
     }
 
