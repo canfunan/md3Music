@@ -65,6 +65,16 @@ object CarFloatHook {
     @Volatile private var floatingRect: IntArray? = null
 
     @JvmStatic
+    fun show(x: Int, y: Int, right: Int, bottom: Int) {
+        onShowMap(x, y, right, bottom)
+    }
+
+    @JvmStatic
+    fun close() {
+        closeFloat()
+    }
+
+    @JvmStatic
     fun install(application: Application) {
         app = application
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
@@ -181,9 +191,10 @@ object CarFloatHook {
             originalView = orig
             engine = eng
 
-            // 2) 新建 texture 模式悬浮 FlutterView（视图层级合成，跨窗口可移植）
-            val view = FlutterView(act, FlutterView.RenderMode.texture)
-            try { view.setTransparencyMode(FlutterView.TransparencyMode.transparent) } catch (_: Throwable) {}
+            // 2) 新建 texture+transparent 模式悬浮 FlutterView（视图层级合成，跨窗口可移植）
+            val view = FlutterView(act,
+                io.flutter.embedding.android.RenderMode.texture,
+                io.flutter.embedding.android.TransparencyMode.transparent)
             view.attachToFlutterEngine(eng)
 
             // 3) 深色容器 + 挂悬浮窗
