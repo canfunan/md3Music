@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -52,7 +53,10 @@ object CarFloatHook {
     const val ACTION_NOVIEW = "cn.kuwo.plus.noview"
 
     private const val FLAG_FLOAT = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL   // 0x120，可聚焦
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            // ③ 漂移回贴：收窗外触摸事件（ACTION_OUTSIDE），外部点击时做一次矩形校准，
+            // 防长期运行中坐标系漂移累积（HyperOS 旋转/密度事件后窗口未跟随）
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH   // 0x120|0x40000，可聚焦
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -80,8 +84,16 @@ object CarFloatHook {
         application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 topActivity = activity
-                // 用户点开应用全屏使用 → 引擎换绑回原 View + 拆悬浮（正确语义，非还原风暴）
-                if (container != null) closeFloat()
+                // L2 语义（对照自闭桌面 payload LifecycleBridge 定案）：
+                //  · 二级页/图标 alias/悬浮歌词入口 resume → 什么都不做，悬浮不动
+                //  · 主界面 resume 且悬浮中 → moveTaskToBack（宿主退后台，悬浮继续）——
+                //    用户"点图标想全屏用"的那条路被物理堵死：全屏必须先显式关悬浮
+                //    （海鸥槽卡 × 或 closemap），应用永远不会全屏冒出来盖住别的界面。
+                //    （旧实现 closeFloat：点图标=收悬浮+全屏打开，悬浮窗生命周期被
+                //    应用导航打乱，正是"悬浮应用跑到别的界面"的根因。）
+                if (container != null && activity.javaClass.simpleName == "MainActivity") {
+                    activity.moveTaskToBack(true)
+                }
             }
             override fun onActivityPaused(activity: Activity) = counterForceResume()
             override fun onActivityStopped(activity: Activity) = counterForceResume()
@@ -202,6 +214,20 @@ object CarFloatHook {
             box.background = ColorDrawable(Color.parseColor("#0E1114"))
             box.addView(view, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            // ③ 漂移回贴：窗外触摸（ACTION_OUTSIDE）→ 用 lastRect 重贴一次参数。
+            //    只校准不收窗不 reply——对海鸥协议完全透明。
+            box.setOnTouchListener { v, ev ->
+                if (ev.action == MotionEvent.ACTION_OUTSIDE) {
+                    val r = floatingRect
+                    if (r != null) {
+                        try {
+                            wm().updateViewLayout(v, buildParams(r[0], r[1], r[2], r[3]))
+                            view.requestLayout()
+                        } catch (_: Throwable) {}
+                    }
+                }
+                false   // 不消费，视图层级默认处理
+            }
             wm().addView(box, buildParams(x, y, w, h))
             container = box
             overlayView = view
